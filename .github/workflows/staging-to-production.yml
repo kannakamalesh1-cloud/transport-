@@ -1,0 +1,115 @@
+name: 🏁 Staging → Production Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ─────────────────────────────────────────
+  # JOB 1: Build Production Image
+  # ─────────────────────────────────────────
+  build-production:
+    name: 🏗️ Build Production Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔑 Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🏷️ Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=production-latest
+            type=sha,prefix=prod-
+            type=semver,pattern={{version}}
+
+      - name: 🐳 Build & Push Production Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.prod       # ← Production optimized dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─────────────────────────────────────────
+  # JOB 2: Deploy to Production (K8s)
+  # ─────────────────────────────────────────
+  deploy-production:
+    name: 🚀 Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build-production
+    environment:
+      name: production          # ← Manual approval required in GitHub
+      url: https://transport.in
+
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: 🔐 Configure Kubeconfig (Production)
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_PRODUCTION }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: 🚢 Deploy to Production Kubernetes
+        run: |
+          IMAGE_TAG="ghcr.io/${{ github.repository }}:prod-${{ github.sha }}"
+          
+          # Update image in production deployment
+          kubectl set image deployment/transport-app \
+            transport=$IMAGE_TAG \
+            -n production
+          
+          # Wait for rollout to complete
+          kubectl rollout status deployment/transport-app \
+            -n production \
+            --timeout=300s
+
+      - name: ✅ Verify Production Deployment
+        run: |
+          kubectl get pods -n production
+          kubectl get svc -n production
+
+      - name: 🎉 Notify Production Success
+        if: success()
+        run: |
+          echo "🎉 Production deployment successful!"
+          echo "🔗 URL: https://transport.in"
+          echo "📦 Image: ghcr.io/${{ github.repository }}:prod-${{ github.sha }}"
+
+      - name: ⏪ Rollback on Failure
+        if: failure()
+        run: |
+          echo "❌ Deployment failed! Rolling back..."
+          kubectl rollout undo deployment/transport-app -n production
+          echo "↩️ Rollback completed"

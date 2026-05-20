@@ -1,0 +1,102 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transport-app
+  namespace: staging
+  labels:
+    app: transport
+    env: staging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: transport
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: transport
+        env: staging
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret          # ← GHCR pull secret
+      containers:
+        - name: transport
+          image: ghcr.io/kannakamalesh1-cloud/transport-:staging-latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: "staging"
+            - name: PORT
+              value: "3000"
+          envFrom:
+            - secretRef:
+                name: transport-secrets-staging   # ← Add your secrets here
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "300m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: transport-service
+  namespace: staging
+spec:
+  selector:
+    app: transport
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: transport-ingress
+  namespace: staging
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+    - host: staging.transport.in
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: transport-service
+                port:
+                  number: 80
